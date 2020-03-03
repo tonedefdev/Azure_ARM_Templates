@@ -1,0 +1,564 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "environmentName": {
+            "type": "string",
+            "metadata": {
+                "description": "Name of the environment which will be used for VM, VNet, Public IPs, NSGs, etc. Name cannot contain spaces"
+            }
+        },
+        "adminUsername": {
+            "type": "string",
+            "metadata": {
+                "description": "Admin username used for VMs."
+            }
+        },
+        "adminPassword": {
+            "type": "securestring",
+            "minLength": 8,
+            "metadata": {
+                "description": "Admin password for VMs. Must contain one capital letter, number, and a special character like !,@,#"
+            }
+        },
+        "publicLoadBalancerDNSLabel": {
+            "type": "string",
+            "metadata": {
+                "description": "Azure DNS FQDN for the Public Load Balancer IP Address. Must be unique!"
+            }
+        },
+        "vmPublisher": {
+            "type": "string",
+            "metadata": {
+                "description": "Linux VM publisher"
+            },
+            "allowedValues": [
+                "Canonical",
+                "OpenLogic"
+            ]
+        },
+        "vmOffer": {
+            "type": "string",
+            "metadata": {
+                "description": "Linux VM offer"
+            },
+            "allowedValues": [
+                "UbuntuServer",
+                "CentOS"
+            ]
+        },
+        "vmSku": {
+            "type": "string",
+            "metadata": {
+                "description": "Linux VM sku"
+            },
+            "allowedValues": [
+                "18.04-LTS",
+                "7.5"
+            ]
+        },
+        "vmSize": {
+            "type": "string",
+            "defaultValue": "Standard_DS2_v2"
+        },
+        "vmDiskSize": {
+            "type": "int",
+            "metadata": {
+                "description": "The size of the OS disk in GB"
+            }
+        },
+        "vpnAddressPrefix": {
+            "type": "string",
+            "defaultValue": "172.16.0.0/24",
+            "allowedValues": [
+                "172.16.0.0/24",
+                "172.17.0.0/24",
+                "172.18.0.0/24",
+                "172.19.0.0/24",
+                "172.20.0.0/24",
+                "172.21.0.0/24",
+                "172.22.0.0/24",
+                "172.23.0.0/24",
+                "172.24.0.0/24",
+                "172.25.0.0/24",
+                "172.26.0.0/24",
+                "172.27.0.0/24",
+                "172.28.0.0/24",
+                "172.29.0.0/24",
+                "172.30.0.0/24",
+                "172.31.0.0/24",
+                "172.32.0.0/24"
+            ],
+            "metadata": {
+                "description": "VPN tunnel address that is used to connect to environment."
+            }
+        },
+        "networkSubnet": {
+            "type": "string",
+            "defaultValue": "10.1.137.0/24",
+            "metadata": {
+                "description": "IP address range used for the Azure VNet"
+            }
+        },
+        "publicCertData": {
+            "type": "securestring",
+            "metadata": {
+                "description": "Base64 encoded certificate used for SSTP VPN connection"
+            }
+        }
+    },
+    "variables": {
+        "VMName": "[concat(parameters('environmentName'),'VM')]",
+        "VMNicName": "[concat(parameters('environmentName'),'NIC')]",
+        "NSGName": "[concat(parameters('environmentName'),'NSG')]",
+        "VNetName": "[concat(parameters('environmentName'),'VNet')]",
+        "VPNName": "[concat(parameters('environmentName'),'VPN')]",
+        "VPNPublicIPName": "[concat(parameters('environmentName'),'VPNpip')]",
+        "PublicCertName": "[concat(parameters('environmentName'),'PublicCert')]",
+        "PLBName": "[concat(parameters('environmentName'),'PLB')]",
+        "PLBipName": "[concat(parameters('environmentName'),'PLBpip')]",
+        "PLBDNSLabel": "[toLower(parameters('publicLoadBalancerDNSLabel'))]",
+        "PLBdns": "[concat(variables('PLBName'), '.', '[resresourceGroup().location]', '.', 'cloudapp.azure.com')]",
+        "PLBResourceRef": "[concat(resourceId('Microsoft.Network/loadBalancers', variables('PLBName')))]",
+        "PLBFrontEnd": "[concat(variables('PLBResourceRef'), '/frontendIPConfigurations/LoadBalancerFrontEnd')]",
+        "PLBBackEndPool": "[concat(variables('PLBResourceRef'), '/backendAddressPools/', variables('VMName'))]",
+        "PLBTcpProbe": "[concat(variables('PLBResourceRef'), '/probes/tcpProbe')]",
+        "UniqueString": "[uniqueString(resourceGroup().id)]",
+        "VaultName": "[concat(parameters('environmentName'),'Vault')]",
+        "SubnetSplit": "[split(parameters('networkSubnet'), '.')]"
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Network/virtualNetworks",
+            "name": "[variables('VNetName')]",
+            "apiVersion": "2018-02-01",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {
+                "addressSpace": {
+                    "addressPrefixes": [
+                        "[parameters('networkSubnet')]"
+                    ]
+                },
+                "subnets": [
+                    {
+                        "name": "FrontEnd",
+                        "properties": {
+                            "addressPrefix": "[concat(variables('SubnetSplit')[0],'.',variables('SubnetSplit')[1],'.',variables('SubnetSplit')[2],'.16/28')]",
+                            "networkSecurityGroup": {
+                                "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('NSGName'))]"
+                            }
+                        }
+                    },
+                    {
+                        "name": "GatewaySubnet",
+                        "properties": {
+                            "addressPrefix": "[concat(variables('SubnetSplit')[0],'.',variables('SubnetSplit')[1],'.',variables('SubnetSplit')[2],'.64/28')]",
+                            "serviceEndpoints": []
+                        }
+                    }
+                ],
+                "virtualNetworkPeerings": [],
+                "enableDdosProtection": false,
+                "enableVmProtection": false
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/networkSecurityGroups', variables('NSGName'))]"
+            ]
+        },
+        {
+            "name": "[variables('VMNicName')]",
+            "type": "Microsoft.Network/networkInterfaces",
+            "apiVersion": "2018-02-01",
+            "location": "[resourceGroup().location]",
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "ipconfig1",
+                        "properties": {
+                            "privateIPAllocationMethod": "Dynamic",
+                            "subnet": {
+                                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('VNetName'), 'FrontEnd')]"
+                            },
+                            "primary": true,
+                            "privateIPAddressVersion": "IPv4"
+                        }
+                    }
+                ]
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('VNetName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.Network/publicIPAddresses",
+            "sku": {
+                "name": "Standard",
+                "tier": "Regional"
+            },
+            "name": "[variables('PLBipName')]",
+            "apiVersion": "2018-02-01",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {
+                "publicIPAddressVersion": "IPv4",
+                "publicIPAllocationMethod": "Static",
+                "idleTimeoutInMinutes": 4,
+                "dnsSettings": {
+                    "domainNameLabel": "[variables('PLBDNSLabel')]",
+                    "fqdn": "[variables('PLBdns')]"
+                }
+            },
+            "dependsOn": []
+        },
+        {
+            "type": "Microsoft.Network/publicIPAddresses",
+            "sku": {
+                "name": "Basic",
+                "tier": "Regional"
+            },
+            "name": "[variables('VPNPublicIPName')]",
+            "apiVersion": "2018-02-01",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {
+                "publicIPAddressVersion": "IPv4",
+                "publicIPAllocationMethod": "Dynamic",
+                "idleTimeoutInMinutes": 4,
+                "ipTags": []
+            },
+            "dependsOn": []
+        },
+        {
+            "type": "Microsoft.Network/virtualNetworkGateways",
+            "name": "[variables('VPNName')]",
+            "apiVersion": "2018-02-01",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {
+                "ipConfigurations": [
+                    {
+                        "name": "default",
+                        "properties": {
+                            "privateIPAllocationMethod": "Dynamic",
+                            "publicIPAddress": {
+                                "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('VPNPublicIPName'))]"
+                            },
+                            "subnet": {
+                                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('VNetName'), 'GatewaySubnet')]"
+                            }
+                        }
+                    }
+                ],
+                "sku": {
+                    "name": "VpnGw1",
+                    "tier": "VpnGw1",
+                    "capacity": 2
+                },
+                "gatewayType": "Vpn",
+                "vpnType": "RouteBased",
+                "enableBgp": false,
+                "activeActive": false,
+                "vpnClientConfiguration": {
+                    "vpnClientAddressPool": {
+                        "addressPrefixes": [
+                            "[parameters('VPNAddressPrefix')]"
+                        ]
+                    },
+                    "vpnClientProtocols": [
+                        "SSTP"
+                    ],
+                    "vpnClientRootCertificates": [
+                        {
+                            "name": "[variables('PublicCertName')]",
+                            "properties": {
+                                "publicCertData": "[parameters('publicCertData')]"
+                            }
+                        }
+                    ],
+                    "vpnClientRevokedCertificates": [],
+                    "vpnClientIpsecPolicies": []
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', variables('VPNPublicIPName'))]",
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('VNetName'))]"
+            ]
+        },
+        {
+            "apiVersion": "2017-10-01",
+            "name": "[variables('PLBName')]",
+            "type": "Microsoft.Network/loadBalancers",
+            "location": "[resourceGroup().location]",
+            "sku": {
+                "name": "Standard"
+            },
+            "properties": {
+              "frontendIPConfigurations": [
+                {
+                  "name": "LoadBalancerFrontEnd",
+                  "properties": {
+                    "publicIPAddress": {
+                      "id": "[resourceId('Microsoft.Network/publicIPAddresses', variables('PLBipName'))]"
+                    }
+                  }
+                }
+              ],
+              "backendAddressPools": [
+                {
+                  "name": "[variables('VMName')]"
+                }
+              ],
+              "loadBalancingRules": [
+                {
+                    "name": "LBRule1",
+                    "properties": {
+                        "frontendIPConfiguration": {
+                            "id": "[variables('PLBFrontEnd')]"
+                        },
+                        "frontendPort": 443,
+                        "backendPort": 443,
+                        "enableFloatingIP": false,
+                        "idleTimeoutInMinutes": 4,
+                        "protocol": "Tcp",
+                        "loadDistribution": "Default",
+                        "disableOutboundSnat": false,
+                        "backendAddressPool": {
+                            "id": "[variables('PLBBackEndPool')]"
+                        },
+                        "probe": {
+                            "id": "[variables('PLBTcpProbe')]"
+                        }
+                    }
+                }
+              ],
+              "probes": [
+                {
+                  "name": "tcpProbe",
+                  "properties": {
+                    "protocol": "Tcp",
+                    "port": 443,
+                    "intervalInSeconds": 5,
+                    "numberOfProbes": 2
+                  }
+                }
+              ]
+            },
+            "dependsOn": [
+                "[concat('Microsoft.Network/publicIPAddresses/', variables('PLBipName'))]",
+                "[resourceId('Microsoft.Network/virtualNetworks', variables('VNetName'))]",
+                "[resourceId('Microsoft.Compute/virtualMachines', variables('VMName'))]"
+            ]
+          },
+          {
+            "type": "Microsoft.Network/networkSecurityGroups",
+            "name": "[variables('NSGName')]",
+            "apiVersion": "2018-02-01",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {
+                "securityRules": [
+                    {
+                        "name": "AllowSSHfromP2S",
+                        "properties": {
+                            "protocol": "Tcp",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "22",
+                            "sourceAddressPrefix": "[parameters('VPNAddressPrefix')]",
+                            "destinationAddressPrefix": "*",
+                            "destinationAddressPrefixes": [],
+                            "access": "Allow",
+                            "priority": 100,
+                            "direction": "Inbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowHTTPS",
+                        "properties": {
+                            "protocol": "Tcp",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "443",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "[concat(variables('SubnetSplit')[0],'.',variables('SubnetSplit')[1],'.',variables('SubnetSplit')[2],'.16/28')]",
+                            "access": "Allow",
+                            "priority": 120,
+                            "direction": "Inbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowHTTPOutbound",
+                        "properties": {
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "80",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 100,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowHTTPSOutbound",
+                        "properties": {
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "443",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Allow",
+                            "priority": 110,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowAzureStorage",
+                        "properties": {
+                            "protocol": "Tcp",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "Storage.CentralUS",
+                            "access": "Allow",
+                            "priority": 115,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "DenyOutBoundToVPN",
+                        "properties": {
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "[parameters('VPNAddressPrefix')]",
+                            "access": "Deny",
+                            "priority": 150,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "AllowVnetOut",
+                        "properties": {
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "VirtualNetwork",
+                            "destinationAddressPrefix": "VirtualNetwork",
+                            "access": "Allow",
+                            "priority": 4000,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    },
+                    {
+                        "name": "DenyOutbound",
+                        "properties": {
+                            "protocol": "*",
+                            "sourcePortRange": "*",
+                            "destinationPortRange": "*",
+                            "sourceAddressPrefix": "*",
+                            "destinationAddressPrefix": "*",
+                            "access": "Deny",
+                            "priority": 4010,
+                            "direction": "Outbound",
+                            "sourcePortRanges": [],
+                            "destinationPortRanges": [],
+                            "sourceAddressPrefixes": [],
+                            "destinationAddressPrefixes": []
+                        }
+                    }
+                ]
+            },
+            "dependsOn": []
+        },
+        {
+            "type": "Microsoft.Compute/virtualMachines",
+            "name": "[variables('VMName')]",
+            "apiVersion": "2018-04-01",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {
+                "hardwareProfile": {
+                    "vmSize": "[parameters('VMSize')]"
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "[parameters('vmPublisher')]",
+                        "offer": "[parameters('vmOffer')]",
+                        "sku": "[parameters('vmSku')]",
+                        "version": "latest"
+                    },
+                    "osDisk": {
+                        "osType": "Linux",
+                        "name": "[concat(toLower(variables('VMName')), '_osdisk_', variables('UniqueString'))]",
+                        "createOption": "FromImage",
+                        "caching": "ReadWrite",
+                        "managedDisk": {
+                            "storageAccountType": "StandardSSD_LRS"
+                        },
+                        "diskSizeGB": "[parameters('vmDiskSize')]"
+                    }
+                },
+                "osProfile": {
+                    "computerName": "[variables('VMName')]",
+                    "adminUsername": "[parameters('adminUsername')]",
+                    "adminPassword": "[parameters('adminPassword')]",
+                    "secrets": []
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('VMNicName'))]",
+                            "properties": {
+                                "primary": true
+                            }
+                        }
+                    ]
+                }
+            },
+            "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', variables('VMNicName'))]"
+            ]
+        },
+        {
+            "type": "Microsoft.RecoveryServices/vaults",
+            "sku": {
+                "name": "RS0",
+                "tier": "Standard"
+            },
+            "name": "[variables('VaultName')]",
+            "apiVersion": "2018-01-10",
+            "location": "[resourceGroup().location]",
+            "scale": null,
+            "properties": {},
+            "dependsOn": []
+        }
+    ]
+}
